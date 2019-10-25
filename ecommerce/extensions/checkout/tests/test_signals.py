@@ -58,6 +58,13 @@ class SignalTests(ProgramTestMixin, CouponMixin, TestCase):
         order = create_order(basket=basket, user=self.user)
         return order
 
+    def prepare_coupon_order(self):
+        coupon = self.create_coupon()
+        basket = factories.BasketFactory(owner=self.user, site=self.site)
+        basket.add_product(coupon, 1)
+        order = create_order(number=1, basket=basket, user=self.user)
+        return order
+
     def mock_get_program_data(self, is_full):
         data = {'title': 'test_program', 'courses': [{}]}
         if is_full:
@@ -118,16 +125,45 @@ class SignalTests(ProgramTestMixin, CouponMixin, TestCase):
         )
 
     def test_post_checkout_callback_no_credit_provider(self):
+        """
+        Test that if basket has a seat product and no credit provider
+        is present, then send course purchase email
+        """
         order = self.prepare_order('verified')
+        send_course_purchase_email(None, user=self.user, order=order)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].from_email, order.site.siteconfiguration.from_email)
+        self.assertEqual(mail.outbox[0].subject, 'Order Placed')
+
+    def test_post_checkout_callback_non_seat_product(self):
+        """
+        Test that no email is sent if basket contains a single product
+        of non seat type
+        """
+        order = self.prepare_coupon_order()
+        send_course_purchase_email(None, user=self.user, order=order)
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_more_than_one_product(self):
+        """
+        Test that we do not send email if basket contains more
+        than one product
+        """
+        coupon = self.create_coupon()
+        course = CourseFactory(partner=self.partner)
+        seat = course.create_or_update_seat('verified', False, 50, None, None, 2)
+        basket = factories.BasketFactory(owner=self.user, site=self.site)
+        basket.add_product(seat)
+        basket.add_product(coupon)
+        order = create_order(basket=basket, user=self.user)
+
         with LogCapture(LOGGER_NAME) as logger:
             send_course_purchase_email(None, user=self.user, order=order)
             logger.check(
                 (
                     LOGGER_NAME,
-                    'ERROR',
-                    'Failed to send credit receipt notification. Credit seat product [{}] has no provider.'.format(
-                        order.lines.first().product.id
-                    )
+                    'INFO',
+                    'Currently support receipt emails for order with one item.'
                 )
             )
 
@@ -281,12 +317,7 @@ class SignalTests(ProgramTestMixin, CouponMixin, TestCase):
     def test_track_completed_coupon_order(self):
         """ Make sure we do not send GA events for Coupon orders """
         with mock.patch('ecommerce.extensions.checkout.signals.track_segment_event') as mock_track:
-
-            coupon = self.create_coupon()
-            basket = factories.BasketFactory(owner=self.user, site=self.site)
-            basket.add_product(coupon)
-
-            order = factories.create_order(basket=basket, user=self.user)
+            order = self.prepare_coupon_order()
             track_completed_order(None, order)
             assert not mock_track.called
 
